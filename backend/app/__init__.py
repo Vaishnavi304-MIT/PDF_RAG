@@ -1,0 +1,1 @@
+"""IntelliDoc AI FastAPI application."""

@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.pytest_cache/
+.mypy_cache/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+.vite/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+backend/.env
+frontend/.env
+
+
+# Local document database and uploaded PDFs
+backend/data/
+
+# Frontend
+
+backend/.venv
+
+services/__pycache__
+
+*.log

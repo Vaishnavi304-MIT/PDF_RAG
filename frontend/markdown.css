@@ -1,0 +1,97 @@
+
+.markdown-answer {
+  font-size: 12px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+  color: inherit;
+}
+
+.markdown-answer p {
+  font-size: 12px;
+  margin: 0 0 14px;
+}
+
+.markdown-answer h1,
+.markdown-answer h2,
+.markdown-answer h3 {
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.5;
+  margin: 18px 0 10px;
+}
+
+.markdown-answer ul,
+.markdown-answer ol {
+  padding-left: 22px;
+  margin: 10px 0 16px;
+}
+
+.markdown-answer li {
+  font-size: 12px;
+  margin: 6px 0;
+  padding-left: 2px;
+}
+
+.markdown-answer table {
+  display: block;
+  width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  margin: 14px 0;
+  font-size: 12px;
+}
+
+.markdown-answer th,
+.markdown-answer td {
+  border: 1px solid rgba(127,127,127,.3);
+  padding: 9px 12px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown-answer th {
+  font-weight: 700;
+  background: rgba(127,127,127,.12);
+}
+
+.markdown-answer pre {
+  overflow-x: auto;
+  padding: 12px;
+  border-radius: 10px;
+  background: rgba(127,127,127,.14);
+}
+
+.markdown-answer code {
+  font-family: Consolas, monospace;
+  font-size: 12px;
+}
+
+.markdown-answer a {
+  color: #8da5ff;
+  text-decoration: underline;
+}
+
+.markdown-answer blockquote {
+  margin: 12px 0;
+  padding: 8px 14px;
+  border-left: 3px solid #8176e8;
+  background: rgba(127,127,127,.08);
+}
+
+.suggested-questions {
+  margin-top: 16px;
+}
+
+.suggested-questions button {
+  font-size: 12px;
+  border: 1px solid rgba(140,120,220,.4);
+  background: transparent;
+  color: inherit;
+  border-radius: 16px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.suggested-questions button:hover {
+  background: rgba(140,120,220,.12);
+}
