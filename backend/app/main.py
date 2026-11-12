@@ -27,7 +27,7 @@ MAP_PATH = DATA_DIR / "faiss_mapping.json"
 MAX_FILE_SIZE = 20 * 1024 * 1024
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 150
-MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+MODEL_NAME = "sentence-transformers/paraphrase-MiniLM-L3-v2"
 TOP_K_DEFAULT = 5
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
