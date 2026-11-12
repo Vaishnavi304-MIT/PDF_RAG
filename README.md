@@ -128,3 +128,5 @@ Replace `YOUR_GITHUB_USERNAME` with your GitHub username.
 5. Add Supabase PostgreSQL/pgvector and persistent chat/document storage.
 6. Integrate Groq for answer generation and DuckDuckGo for fallback web search.
 7. Add authentication, security, testing, and deployment.
+
+
