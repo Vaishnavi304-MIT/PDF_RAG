@@ -34,3 +34,5 @@ backend/.venv
 services/__pycache__
 
 *.log
+
+.env
