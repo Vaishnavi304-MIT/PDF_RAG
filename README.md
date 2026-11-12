@@ -137,25 +137,6 @@ Frontend: `http://localhost:5173`
 
 Configure the frontend API URL in `frontend/.env` according to your backend configuration.
 
-## Deployment
-
-The application uses separate hosting services for the frontend and backend.
-
-| Service | Platform | Purpose |
-|---|---|---|
-| Frontend | Vercel | Hosts the React + Vite application |
-| Backend | Render | Hosts the FastAPI application |
-| Source Code | GitHub | Repository and deployment integration |
-
-**Deployment Process:**
-1. Push the project to GitHub.
-2. Deploy the `backend` directory as a Render Web Service.
-3. Deploy the `frontend` directory as a Vercel project.
-4. Configure environment variables and connect the frontend to the deployed backend URL.
-5. Configure CORS and verify API connectivity.
-
-*Note: Render's free filesystem is ephemeral. Use persistent or external storage for uploaded PDFs, FAISS indexes, and SQLite data if they must survive restarts and redeployments.*
-
 ## Results
 
 ### IntelliDoc AI – Application Interface
