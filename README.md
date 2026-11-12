@@ -1,133 +1,183 @@
-# IntelliDoc AI
+# IntelliDoc AI – AI-Powered PDF Chatbot
 
-A full-stack AI document assistant starter. Phase 1 sets up the React frontend, FastAPI backend, environment configuration, and GitHub-ready repository structure.
+IntelliDoc AI is a full-stack AI document assistant that allows users to upload PDF files, ask questions in natural language, and receive context-aware answers using **Retrieval-Augmented Generation (RAG)**. It combines semantic search, Large Language Models, and web search to simplify document understanding.
 
-## Phase 1 scope
-- React + Vite + Tailwind CSS frontend
-- FastAPI backend with health-check endpoint
-- Frontend-to-backend API connection
-- Environment variable templates
-- Git-ready project structure
+## Features
 
-> Groq, PDF ingestion, RAG, Supabase, and DuckDuckGo are intentionally added in later phases. Phase 1 does not require API keys or paid services.
+- PDF upload, text extraction, and document management.
+- Semantic search using Sentence Transformers and FAISS.
+- RAG-based question answering using Groq LLM.
+- PDF filename and page-level source citations.
+- DuckDuckGo web search for additional information.
+- Multiple chat sessions with history management.
+- AI-generated suggested follow-up questions.
+- Markdown-formatted conversational responses.
 
-## Requirements
-- Python 3.10+
-- Node.js 20.19+ or 22.12+
-- Git
-- VS Code (recommended)
+## Technology Stack
 
-## 1. Run the backend
+| Category | Technologies |
+|---|---|
+| Frontend | React.js, Vite, CSS |
+| Backend | Python, FastAPI |
+| PDF Processing | PyMuPDF |
+| Embeddings | Sentence Transformers (`all-MiniLM-L6-v2`) |
+| Vector Database | FAISS |
+| Database | SQLite |
+| LLM | Groq API |
+| Web Search | DuckDuckGo |
+| Deployment | Vercel, Render |
+| Version Control | Git, GitHub |
 
-Open a terminal in the repository root:
+## System Architecture
 
-### Windows PowerShell
-```powershell
-cd backend
-py -3 -m venv .venv
-.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-Copy-Item .env.example .env
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```mermaid
+flowchart TD
+    A[User] --> B[React + Vite Frontend]
+    B <--> C[FastAPI Backend]
+
+    C --> D[PDF Upload]
+    D --> E[PyMuPDF Extraction]
+    E --> F[Text Chunking]
+    F --> G[Sentence Transformers]
+    G --> H[FAISS Vector Database]
+
+    C --> I[User Query]
+    I --> J[Semantic Retrieval]
+    J --> H
+    H --> K[Relevant Document Chunks]
+    K --> L[Groq LLM]
+    L --> M[Answer with Citations]
+
+    C <--> N[SQLite Database]
+    L <--> O[DuckDuckGo Search]
+    M --> B
 ```
 
-If PowerShell blocks activation, run:
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.venv\Scripts\Activate.ps1
+**Workflow:** PDF Upload → Text Extraction → Chunking → Embedding Generation → FAISS Retrieval → Groq LLM → Answer Generation.
+
+## Project Structure
+
+```text
+pdf_rag/
+│
+├── backend/
+│   ├── .venv/
+│   ├── app/
+│   │   ├── services/
+│   │   │   ├── __init__.py
+│   │   │   ├── agent.py
+│   │   │   ├── duckduckgo.py
+│   │   │   └── rag.py
+│   │   ├── __init__.py
+│   │   └── main.py
+│   ├── data/
+│   ├── .env
+│   └── requirements.txt
+│
+├── frontend/
+│   ├── node_modules/
+│   ├── src/
+│   │   ├── App.jsx
+│   │   ├── index.css
+│   │   └── main.jsx
+│   ├── .env
+│   ├── index.html
+│   ├── markdown.css
+│   ├── package-lock.json
+│   ├── package.json
+│   ├── postcss.config.js
+│   ├── tailwind.config.js
+│   └── vite.config.js
+│
+├── .gitignore
+└── README.md
 ```
 
-### macOS / Linux
+## Installation and Setup
+
+**Prerequisites:** Python 3.10+, Node.js, npm, and Git.
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/YOUR_USERNAME/IntelliDoc-AI.git
+cd IntelliDoc-AI
+```
+
+### 2. Start the backend
+
 ```bash
 cd backend
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
+python -m venv .venv
+.venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Backend checks:
-- API health: http://127.0.0.1:8000/health
-- Interactive API docs: http://127.0.0.1:8000/docs
+Configure the required environment variables in `backend/.env`, then run:
 
-Expected health response:
-```json
-{"status":"ok","service":"intellidoc-api","phase":1}
+```bash
+uvicorn app.main:app --reload
 ```
 
-## 2. Run the frontend
+Backend: `http://127.0.0.1:8000`
 
-Open a **second terminal** at the repository root:
+API documentation: `http://127.0.0.1:8000/docs`
+
+### 3. Start the frontend
+
+Open another terminal:
 
 ```bash
 cd frontend
 npm install
-```
-
-Create the local frontend environment file:
-- Windows PowerShell: `Copy-Item .env.example .env`
-- macOS/Linux: `cp .env.example .env`
-
-Then start Vite:
-```bash
 npm run dev
 ```
 
-Open the local URL printed by Vite (usually http://localhost:5173).
+Frontend: `http://localhost:5173`
 
-The page calls the FastAPI `/health` endpoint and shows whether the backend is reachable.
+Configure the frontend API URL in `frontend/.env` according to your backend configuration.
 
-## 3. Create the GitHub repository
+## Deployment
 
-1. Sign in to GitHub and choose **New repository**.
-2. Repository name: `IntelliDoc-AI`
-3. Choose Public or Private. Do not initialize with a README if you already have this project folder.
-4. In a terminal at the project root, run:
+The application uses separate hosting services for the frontend and backend.
 
-```bash
-git init
-git add .
-git commit -m "Initial IntelliDoc AI full-stack scaffold"
-git branch -M main
-git remote add origin https://github.com/YOUR_GITHUB_USERNAME/IntelliDoc-AI.git
-git push -u origin main
-```
+| Service | Platform | Purpose |
+|---|---|---|
+| Frontend | Vercel | Hosts the React + Vite application |
+| Backend | Render | Hosts the FastAPI application |
+| Source Code | GitHub | Repository and deployment integration |
 
-Replace `YOUR_GITHUB_USERNAME` with your GitHub username.
+**Deployment Process:**
+1. Push the project to GitHub.
+2. Deploy the `backend` directory as a Render Web Service.
+3. Deploy the `frontend` directory as a Vercel project.
+4. Configure environment variables and connect the frontend to the deployed backend URL.
+5. Configure CORS and verify API connectivity.
 
-## 4. Environment variables and secrets
+*Note: Render's free filesystem is ephemeral. Use persistent or external storage for uploaded PDFs, FAISS indexes, and SQLite data if they must survive restarts and redeployments.*
 
-- `backend/.env` and `frontend/.env` are local-only files and are ignored by Git.
-- Never commit API keys, database passwords, Supabase service-role keys, or `.env` files.
-- Commit only `.env.example` files with placeholder values.
-- In later phases, production secrets will be entered in the hosting provider's environment-variable settings.
+## Results
 
-## 5. Troubleshooting
+### IntelliDoc AI – Application Interface
 
-**Frontend says backend is offline**
-- Ensure the backend terminal is still running on port 8000.
-- Check `frontend/.env` contains `VITE_API_BASE_URL=http://127.0.0.1:8000`.
-- Restart the Vite dev server after changing `.env`.
-
-**`npm` is not recognized**
-- Install Node.js LTS, close and reopen the terminal, then run `node -v` and `npm -v`.
-
-**`uvicorn` is not recognized**
-- Activate the Python virtual environment and run `python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000`.
-
-**CORS errors**
-- Confirm the frontend origin in `backend/.env` matches the Vite URL. The default is `http://localhost:5173`.
-
-## Next phases
-2. Build the polished chat interface and document library.
-3. Add PDF upload, extraction, chunking, and page-level metadata.
-4. Generate embeddings and implement RAG retrieval.
-5. Add Supabase PostgreSQL/pgvector and persistent chat/document storage.
-6. Integrate Groq for answer generation and DuckDuckGo for fallback web search.
-7. Add authentication, security, testing, and deployment.
+<img width="1853" height="837" alt="Screenshot 2026-11-12 203858" src="https://github.com/user-attachments/assets/945ea785-6878-43cd-ae28-2d9b49023003" />
+<img width="1847" height="836" alt="Screenshot 2026-11-12 203933" src="https://github.com/user-attachments/assets/0d7c33dd-4f4c-4855-8747-4b48a5a9bcc9" />
 
 
-# PDF_RAG
+**Live Website:** [View IntelliDoc AI](YOUR_DEPLOYED_WEBSITE_URL)
+
+## Future Enhancements
+
+- OCR support for scanned PDFs.
+- Support for additional document formats.
+- User authentication and access control.
+- Hybrid search and retrieval optimization.
+- Cloud-based persistent document storage.
+
+## Conclusion
+
+IntelliDoc AI demonstrates the practical integration of RAG, semantic search, and generative AI into a full-stack document assistant, enabling users to interact with PDF documents through natural-language conversations.
+
+---
+
+**Developed using React, FastAPI, FAISS, Sentence Transformers, and Groq.**
