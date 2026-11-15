@@ -100,7 +100,7 @@ pdf_rag/
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/IntelliDoc-AI.git
+git clone https://github.com/Vaishnavi304-MIT/PDF_RAG.git
 cd IntelliDoc-AI
 ```
 
