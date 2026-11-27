@@ -316,8 +316,6 @@ Migration configuration requires:
 ```env
 SUPABASE_URL=your_supabase_project_url
 SUPABASE_ANON_KEY=your_publishable_or_anon_key
-SUPABASE_EMAIL=your_registered_email
-SUPABASE_PASSWORD=your_account_password
 ```
 
 Run the migration script using the Python environment configured for the backend.
