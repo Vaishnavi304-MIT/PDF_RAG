@@ -46,6 +46,24 @@ flowchart TD
     C <--> R[Chat History and Sessions]
     R <--> I
 ```
+### Architecture Components
+
+- **React + Vite:** Provides the user interface for PDF uploads, conversations, and displaying AI responses.
+- **FastAPI:** Handles API requests, PDF processing, retrieval, and communication between services.
+- **PyMuPDF:** Extracts text and page information from PDFs.
+- **FastEmbed:** Converts document text and user questions into numerical embeddings.
+- **Supabase PostgreSQL + pgvector:** Stores document chunks and embeddings and performs semantic similarity searches.
+- **Supabase Storage:** Stores uploaded PDF files.
+- **Supabase Auth:** Handles user authentication.
+- **Groq LLM:** Generates natural-language answers using retrieved document context.
+- **DuckDuckGo:** Retrieves external web information when required.
+
+### Working Process
+
+1. **Document Processing:** PDF files are uploaded, text is extracted using PyMuPDF, divided into chunks, and converted into embeddings using FastEmbed. The files are stored in Supabase Storage, while chunks and embeddings are stored in PostgreSQL with pgvector.
+2. **Question Processing:** The user's question is converted into an embedding, and pgvector retrieves semantically relevant document chunks.
+3. **Answer Generation:** Retrieved text is provided as context to the Groq LLM, which generates a natural-language response with relevant PDF source and page references.
+4. **Response Delivery:** FastAPI sends the generated answer to React, where it is displayed in Markdown format. Chat history is stored in Supabase, and DuckDuckGo can provide additional web references when needed.
 
 ## Features
 
