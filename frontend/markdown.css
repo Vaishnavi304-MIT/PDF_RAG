@@ -95,3 +95,56 @@
 .suggested-questions button:hover {
   background: rgba(140,120,220,.12);
 }
+
+.message-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 7px 0 12px;
+}
+
+.message-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 9px;
+  border: 1px solid #e7e1f2;
+  border-radius: 7px;
+  background: transparent;
+  color: #71658b;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+
+.message-action:hover {
+  background: #f1ebff;
+  color: #7040d9;
+}
+
+.message-action:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.editing-indicator {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 9px 13px;
+  margin-bottom: 8px;
+  border-radius: 9px;
+  background: #f1ebff;
+  color: #7040d9;
+  font-size: 13px;
+}
+
+.editing-indicator button {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}

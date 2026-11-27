@@ -1,101 +1,199 @@
-from pathlib import Path
+from __future__ import annotations
+
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
+from threading import RLock
 from uuid import uuid4
-import sqlite3
+import os
 import re
 import json
-import threading
-import os
+import logging
+from urllib.parse import urlencode
+from urllib.request import Request as URLRequest, urlopen
+from urllib.error import URLError, HTTPError
+from typing import Any
 
-import fitz
-import faiss
+from aiohttp import request
+import pymupdf as fitz
 import numpy as np
 from sentence_transformers import SentenceTransformer
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
+from supabase import Client, create_client
+from storage3 import SyncStorageClient
+from dotenv import load_dotenv
 
 from app.services.agent import answer_question
+from fastapi.responses import JSONResponse
+from app.services.rag import GroqQuotaExceeded
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BASE_DIR / "data"
-UPLOAD_DIR = DATA_DIR / "uploads"
-DB_PATH = DATA_DIR / "intellidoc.db"
-INDEX_PATH = DATA_DIR / "faiss.index"
-MAP_PATH = DATA_DIR / "faiss_mapping.json"
+# Load local development environment files; container/cloud providers inject env vars directly.
+_BACKEND_DIR = Path(__file__).resolve().parents[1]
+load_dotenv(_BACKEND_DIR / ".env")
+load_dotenv(_BACKEND_DIR.parent / ".env", override=False)
 
-MAX_FILE_SIZE = 20 * 1024 * 1024
+MAX_FILE_SIZE = 50 * 1024 * 1024
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 150
-MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+MODEL_NAME = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+EMBEDDING_DIMENSION = 384
 TOP_K_DEFAULT = 5
+STORAGE_BUCKET = os.getenv("SUPABASE_STORAGE_BUCKET", "intellidoc-documents")
 
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-
-app = FastAPI(title="IntelliDoc AI API", version="0.5.0")
+app = FastAPI(title="IntelliDoc AI API", version="1.1.0")
+_default_origins = [
+    "http://localhost:5173", "http://127.0.0.1:5173",
+    "http://localhost:8080", "http://127.0.0.1:8080",
+]
+_allowed_origins = [
+    origin.strip()
+    for origin in os.getenv("CORS_ORIGINS", ",".join(_default_origins)).split(",")
+    if origin.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-db_lock = threading.RLock()
-vector_lock = threading.RLock()
 model = None
-faiss_index = None
-vector_mapping = []
+model_lock = RLock()
+anon_client: Client | None = None
+client_lock = RLock()
+bearer = HTTPBearer(auto_error=False)
+
+logger = logging.getLogger(__name__)
 
 
-def get_connection():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+
+@app.exception_handler(GroqQuotaExceeded)
+async def groq_quota_handler(request, exc):
+    return JSONResponse(
+        status_code=429,
+        content={
+            "code": "GROQ_QUOTA_EXCEEDED",
+            "detail": (
+                "Sorry! IntelliDoc AI has temporarily reached "
+                "its AI service usage limit. Your documents and "
+                "chat history are safe. Please try again when "
+                "the API quota resets."
+            ),
+            "retry_after": exc.retry_after,
+        },
+    )
+
+@dataclass
+class AuthContext:
+    user_id: str
+    client: Client
+    storage: SyncStorageClient
 
 
-def initialize_database():
-    with get_connection() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS documents (
-                id TEXT PRIMARY KEY,
-                filename TEXT NOT NULL,
-                stored_filename TEXT NOT NULL,
-                file_size INTEGER NOT NULL,
-                page_count INTEGER NOT NULL,
-                extracted_chars INTEGER NOT NULL,
-                uploaded_at TEXT NOT NULL
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS chunks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                document_id TEXT NOT NULL,
-                page_number INTEGER NOT NULL,
-                chunk_index INTEGER NOT NULL,
-                content TEXT NOT NULL,
-                FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
-            )
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_document ON chunks(document_id)")
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS chat_sessions (
-                id TEXT PRIMARY KEY, title TEXT NOT NULL,
-                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS chat_messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                chat_id TEXT NOT NULL, role TEXT NOT NULL,
-                content TEXT NOT NULL, created_at TEXT NOT NULL,
-                FOREIGN KEY(chat_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
-            )
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_messages_chat ON chat_messages(chat_id, id)")
-        conn.commit()
+def get_anon_client() -> Client:
+    """Create a Supabase client with the public anon/publishable key only."""
+    global anon_client
+    if anon_client is None:
+        with client_lock:
+            if anon_client is None:
+                url = os.getenv("SUPABASE_URL", "").strip()
+                key = (
+                    os.getenv("SUPABASE_ANON_KEY", "").strip()
+                    or os.getenv("SUPABASE_PUBLISHABLE_KEY", "").strip()
+                )
+                if not url or not key:
+                    raise RuntimeError("SUPABASE_URL and SUPABASE_ANON_KEY must be configured.")
+                anon_client = create_client(url, key)
+    return anon_client
+
+
+def require_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
+) -> AuthContext:
+    """Validate a Supabase JWT and create user-scoped database and Storage clients.
+
+    Compatible with supabase==2.34.1 and storage3==2.34.1. The public
+    anon/publishable key is used as the API key; the user's access token is
+    sent as the Authorization bearer token so Supabase RLS remains active.
+    """
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Sign in to continue.")
+
+    token = credentials.credentials.strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing Supabase access token.")
+
+    url = os.getenv("SUPABASE_URL", "").strip()
+    key = (
+        os.getenv("SUPABASE_ANON_KEY", "").strip()
+        or os.getenv("SUPABASE_PUBLISHABLE_KEY", "").strip()
+    )
+    if not url or not key:
+        logger.error("Supabase URL or anon/publishable key is not configured.")
+        raise HTTPException(
+            status_code=503,
+            detail="Backend Supabase configuration is incomplete.",
+        )
+
+    # Create a new client for this request. Never mutate a shared client's
+    # Authorization header because requests from different users can overlap.
+    try:
+        user_client = create_client(url, key)
+    except Exception as exc:
+        logger.exception("Could not initialize a request-scoped Supabase client.")
+        raise HTTPException(
+            status_code=503,
+            detail="Could not initialize the Supabase connection.",
+        ) from exc
+
+    # Validate the bearer token with Supabase Auth.
+    try:
+        verified = user_client.auth.get_user(token)
+        user = getattr(verified, "user", None)
+        if user is None or not getattr(user, "id", None):
+            raise ValueError("Supabase Auth returned no user.")
+    except Exception as exc:
+        logger.exception(
+            "Supabase Auth rejected the bearer token. Check that frontend and "
+            "backend use the same Supabase project and that the browser sends "
+            "the current access_token."
+        )
+        raise HTTPException(
+            status_code=401,
+            detail="Supabase did not accept this access token. Refresh your session and try again.",
+        ) from exc
+
+    try:
+        # PostgREST's auth() method sets the Authorization bearer token for
+        # database requests made through this request-scoped client.
+        user_client.postgrest.auth(token)
+
+        # storage3 2.34.1 exposes SyncStorageClient; it does not expose
+        # storage.auth(token) on the Supabase Client. Construct Storage with
+        # the public API key and this user's JWT explicitly.
+        storage_client = SyncStorageClient(
+            f"{url.rstrip('/')}/storage/v1",
+            {
+                "apiKey": key,
+                "Authorization": f"Bearer {token}",
+            },
+        )
+    except Exception as exc:
+        logger.exception("Could not configure authenticated Supabase access.")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not configure authenticated Supabase access.",
+        ) from exc
+
+    return AuthContext(
+        user_id=str(user.id),
+        client=user_client,
+        storage=storage_client,
+    )
 
 
 def split_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP):
@@ -121,101 +219,62 @@ def split_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP):
 def get_model():
     global model
     if model is None:
-        # The model is downloaded from Hugging Face on first use and then cached locally.
-        model = SentenceTransformer(MODEL_NAME)
+        with model_lock:
+            if model is None:
+                model = SentenceTransformer(MODEL_NAME, device=os.getenv("EMBEDDING_DEVICE", "cpu"))
     return model
 
 
-def encode_texts(texts):
+def encode_texts(texts: list[str]) -> list[list[float]]:
     if not texts:
-        return np.empty((0, 384), dtype="float32")
+        return []
     vectors = get_model().encode(
-        texts,
-        convert_to_numpy=True,
-        normalize_embeddings=True,
-        show_progress_bar=False,
+        texts, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False
     )
-    return np.asarray(vectors, dtype="float32")
+    vectors = np.asarray(vectors, dtype="float32")
+    if vectors.ndim != 2 or vectors.shape[1] != EMBEDDING_DIMENSION:
+        raise RuntimeError(f"Expected 384-dimensional embeddings; received {vectors.shape}.")
+    return vectors.tolist()
 
 
-def load_vector_index():
-    global faiss_index, vector_mapping
-    with vector_lock:
-        if INDEX_PATH.exists() and MAP_PATH.exists():
-            try:
-                faiss_index = faiss.read_index(str(INDEX_PATH))
-                vector_mapping = json.loads(MAP_PATH.read_text(encoding="utf-8"))
-                if faiss_index.ntotal != len(vector_mapping):
-                    raise ValueError("FAISS index and mapping are out of sync")
-                return
-            except Exception:
-                faiss_index = None
-                vector_mapping = []
-
-        rebuild_vector_index()
+def rows(response: Any) -> list[dict]:
+    return response.data or []
 
 
-def persist_vector_index(index, mapping):
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    temp_index = DATA_DIR / "faiss.index.tmp"
-    temp_map = DATA_DIR / "faiss_mapping.json.tmp"
-    faiss.write_index(index, str(temp_index))
-    temp_map.write_text(json.dumps(mapping, ensure_ascii=False), encoding="utf-8")
-    temp_index.replace(INDEX_PATH)
-    temp_map.replace(MAP_PATH)
-
-
-def rebuild_vector_index():
-    global faiss_index, vector_mapping
-    with vector_lock:
-        with get_connection() as conn:
-            rows = conn.execute("""
-                SELECT c.id AS chunk_id, c.document_id, c.page_number, c.chunk_index,
-                       c.content, d.filename
-                FROM chunks c JOIN documents d ON d.id = c.document_id
-                ORDER BY c.id
-            """).fetchall()
-
-        if not rows:
-            faiss_index = faiss.IndexFlatIP(384)
-            vector_mapping = []
-            persist_vector_index(faiss_index, vector_mapping)
-            return
-
-        texts = [row["content"] for row in rows]
-        vectors = encode_texts(texts)
-        index = faiss.IndexFlatIP(vectors.shape[1])
-        index.add(vectors)
-        mapping = [
-            {
-                "chunk_id": row["chunk_id"],
-                "document_id": row["document_id"],
-                "filename": row["filename"],
-                "page_number": row["page_number"],
-                "chunk_index": row["chunk_index"],
-                "content": row["content"],
-            }
-            for row in rows
-        ]
-        persist_vector_index(index, mapping)
-        faiss_index = index
-        vector_mapping = mapping
-
-
-def document_to_dict(row):
+def document_to_dict(row: dict) -> dict:
     return {
-        "id": row["id"],
-        "filename": row["filename"],
-        "file_size": row["file_size"],
-        "page_count": row["page_count"],
-        "extracted_chars": row["extracted_chars"],
-        "uploaded_at": row["uploaded_at"],
+        "id": row["id"], "filename": row["filename"],
+        "file_size": row["file_size"], "page_count": row["page_count"],
+        "extracted_chars": row["extracted_chars"], "uploaded_at": row["uploaded_at"],
     }
+
+
+def insert_chunks(ctx: AuthContext, document_id: str, chunks: list[tuple[int, int, str]]):
+    for start in range(0, len(chunks), 40):
+        batch = chunks[start:start + 40]
+        vectors = encode_texts([item[2] for item in batch])
+        payload = [
+            {
+                "owner_id": ctx.user_id,
+                "document_id": document_id,
+                "page_number": page,
+                "chunk_index": index,
+                "content": content,
+                "embedding": vector,
+            }
+            for (page, index, content), vector in zip(batch, vectors)
+        ]
+        if payload:
+            ctx.client.table("document_chunks").insert(payload).execute()
 
 
 class SearchRequest(BaseModel):
     query: str = Field(min_length=2, max_length=2000)
     top_k: int = Field(default=TOP_K_DEFAULT, ge=1, le=10)
+
+
+class TurnstileVerifyRequest(BaseModel):
+    token: str = Field(min_length=1, max_length=2048)
 
 
 class ChatMessage(BaseModel):
@@ -228,16 +287,7 @@ class ChatRequest(BaseModel):
     chat_id: str | None = None
     history: list[ChatMessage] = Field(default_factory=list)
     top_k: int = Field(default=5, ge=1, le=10)
-
-
-initialize_database()
-
-
-@app.on_event("startup")
-def startup_event():
-    # Loading an existing index is quick. If no index exists, rebuild only when chunks exist.
-    load_vector_index()
-
+    edit_from_index: int | None = Field(default=None, ge=0)
 
 @app.get("/")
 def root():
@@ -246,20 +296,87 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "IntelliDoc AI API"}
+    """Public liveness check. Protected endpoints validate each user's JWT."""
+    url = os.getenv("SUPABASE_URL", "").strip()
+    key = (
+        os.getenv("SUPABASE_ANON_KEY", "").strip()
+        or os.getenv("SUPABASE_PUBLISHABLE_KEY", "").strip()
+    )
+    return {
+        "status": "ok",
+        "service": "IntelliDoc AI API",
+        "supabase_configured": bool(url and key),
+    }
+
+
+@app.post("/api/auth/verify-captcha")
+def verify_login_captcha(payload: TurnstileVerifyRequest):
+    """
+    Verify a one-time Cloudflare Turnstile token for email/password login only.
+    Supabase's global Auth CAPTCHA setting must be OFF for this split policy;
+    the frontend calls this endpoint before signInWithPassword.
+    """
+    secret = os.getenv("TURNSTILE_SECRET_KEY", "").strip()
+    if not secret:
+        raise HTTPException(
+            status_code=503,
+            detail="Login CAPTCHA is not configured on the backend.",
+        )
+
+    form_data = urlencode({
+        "secret": secret,
+        "response": payload.token,
+    }).encode("utf-8")
+    request = URLRequest(
+        "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+        data=form_data,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+
+    try:
+        with urlopen(request, timeout=8) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, ValueError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Could not verify the Cloudflare challenge. Please try again.",
+        ) from exc
+
+    if not result.get("success"):
+        # Do not expose provider internals or secrets to the browser.
+        raise HTTPException(
+            status_code=400,
+            detail="Cloudflare verification failed or expired. Complete the check again.",
+        )
+
+    allowed_hostnames = {
+        item.strip().lower()
+        for item in os.getenv("TURNSTILE_ALLOWED_HOSTNAMES", "").split(",")
+        if item.strip()
+    }
+    hostname = str(result.get("hostname", "")).lower()
+    if allowed_hostnames and hostname not in allowed_hostnames:
+        raise HTTPException(status_code=400, detail="CAPTCHA hostname is not allowed.")
+
+    return {"verified": True}
+
+
+@app.get("/api/me")
+def me(ctx: AuthContext = Depends(require_user)):
+    return {"user_id": ctx.user_id}
 
 
 @app.post("/api/documents/upload")
-async def upload_document(file: UploadFile = File(...)):
+async def upload_document(file: UploadFile = File(...), ctx: AuthContext = Depends(require_user)):
     original_name = Path(file.filename or "document.pdf").name
     if not original_name.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
-
     content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail="The uploaded file is empty.")
     if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=413, detail="PDF exceeds the 20 MB upload limit.")
+        raise HTTPException(status_code=413, detail="PDF exceeds the 50 MB upload limit.")
     if not content.startswith(b"%PDF-"):
         raise HTTPException(status_code=400, detail="The file does not appear to be a valid PDF.")
 
@@ -276,288 +393,327 @@ async def upload_document(file: UploadFile = File(...)):
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Could not read this PDF: {exc}") from exc
 
-    extracted_text = "\n".join(text for _, text in page_texts)
-    if not extracted_text.strip():
-        raise HTTPException(
-            status_code=422,
-            detail="No selectable text was found. This may be a scanned/image-only PDF; OCR is not included yet.",
-        )
-
-    prepared_chunks = []
-    for page_number, page_text in page_texts:
-        for chunk_index, chunk in enumerate(split_text(page_text)):
-            prepared_chunks.append((page_number, chunk_index, chunk))
-    if not prepared_chunks:
+    extracted = "\n".join(text for _, text in page_texts)
+    if not extracted.strip():
+        raise HTTPException(status_code=422, detail="No selectable text was found. OCR is not included yet.")
+    chunks = [
+        (page, index, chunk)
+        for page, page_text in page_texts
+        for index, chunk in enumerate(split_text(page_text))
+    ]
+    if not chunks:
         raise HTTPException(status_code=422, detail="No text chunks could be created from this PDF.")
 
     document_id = str(uuid4())
-    stored_filename = f"{document_id}.pdf"
-    stored_path = UPLOAD_DIR / stored_filename
-    uploaded_at = datetime.now(timezone.utc).isoformat()
-
+    storage_path = f"{ctx.user_id}/{document_id}/{document_id}.pdf"
+    uploaded = False
+    inserted = False
+    now = datetime.now(timezone.utc).isoformat()
     try:
-        stored_path.write_bytes(content)
-        with db_lock, get_connection() as conn:
-            conn.execute(
-                """INSERT INTO documents
-                   (id, filename, stored_filename, file_size, page_count, extracted_chars, uploaded_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (document_id, original_name, stored_filename, len(content), page_count, len(extracted_text), uploaded_at),
-            )
-            conn.executemany(
-                """INSERT INTO chunks (document_id, page_number, chunk_index, content)
-                   VALUES (?, ?, ?, ?)""",
-                [(document_id, page, idx, chunk) for page, idx, chunk in prepared_chunks],
-            )
-            conn.commit()
-
-        # Rebuild persisted index so new chunks are searchable immediately.
-        rebuild_vector_index()
+        ctx.storage.from_(STORAGE_BUCKET).upload(
+            storage_path, content,
+            file_options={"content-type": "application/pdf", "upsert": "false", "cache-control": "3600"},
+        )
+        uploaded = True
+        ctx.client.table("documents").insert({
+            "id": document_id, "owner_id": ctx.user_id,
+            "filename": original_name, "storage_path": storage_path,
+            "file_size": len(content), "page_count": page_count,
+            "extracted_chars": len(extracted), "uploaded_at": now,
+        }).execute()
+        inserted = True
+        insert_chunks(ctx, document_id, chunks)
     except Exception as exc:
-        with db_lock, get_connection() as conn:
-            conn.execute("DELETE FROM chunks WHERE document_id = ?", (document_id,))
-            conn.execute("DELETE FROM documents WHERE id = ?", (document_id,))
-            conn.commit()
-        stored_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=500, detail=f"PDF was extracted but indexing failed: {exc}") from exc
+        try:
+            if inserted:
+                ctx.client.table("documents").delete().eq("id", document_id).execute()
+            if uploaded:
+                ctx.storage.from_(STORAGE_BUCKET).remove([storage_path])
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail=f"PDF upload or indexing failed: {exc}") from exc
 
     return {
-        "message": "PDF uploaded, processed and indexed successfully.",
+        "message": "PDF uploaded to Supabase, processed and indexed successfully.",
         "document": {
-            "id": document_id,
-            "filename": original_name,
-            "file_size": len(content),
-            "page_count": page_count,
-            "extracted_chars": len(extracted_text),
-            "chunk_count": len(prepared_chunks),
-            "uploaded_at": uploaded_at,
+            "id": document_id, "filename": original_name, "file_size": len(content),
+            "page_count": page_count, "extracted_chars": len(extracted),
+            "chunk_count": len(chunks), "uploaded_at": now,
         },
     }
 
 
 @app.get("/api/documents")
-def list_documents():
-    with get_connection() as conn:
-        rows = conn.execute(
-            "SELECT id, filename, file_size, page_count, extracted_chars, uploaded_at FROM documents ORDER BY uploaded_at DESC"
-        ).fetchall()
-    return {"documents": [document_to_dict(row) for row in rows]}
+def list_documents(ctx: AuthContext = Depends(require_user)):
+    result = ctx.client.table("documents").select(
+        "id,filename,file_size,page_count,extracted_chars,uploaded_at"
+    ).eq("owner_id", ctx.user_id).order("uploaded_at", desc=True).execute()
+    return {"documents": [document_to_dict(row) for row in rows(result)]}
 
 
 @app.get("/api/documents/{document_id}")
-def get_document(document_id: str):
-    with get_connection() as conn:
-        row = conn.execute(
-            "SELECT id, filename, file_size, page_count, extracted_chars, uploaded_at FROM documents WHERE id = ?",
-            (document_id,),
-        ).fetchone()
-        if row is None:
-            raise HTTPException(status_code=404, detail="Document not found.")
-        chunk_rows = conn.execute(
-            "SELECT page_number, chunk_index, content FROM chunks WHERE document_id = ? ORDER BY page_number, chunk_index",
-            (document_id,),
-        ).fetchall()
-    return {
-        "document": document_to_dict(row),
-        "chunks": [
-            {"page_number": r["page_number"], "chunk_index": r["chunk_index"], "content": r["content"]}
-            for r in chunk_rows
-        ],
-    }
+def get_document(document_id: str, ctx: AuthContext = Depends(require_user)):
+    docs = rows(ctx.client.table("documents").select(
+        "id,filename,file_size,page_count,extracted_chars,uploaded_at"
+    ).eq("id", document_id).eq("owner_id", ctx.user_id).limit(1).execute())
+    if not docs:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    chunks = rows(ctx.client.table("document_chunks").select(
+        "page_number,chunk_index,content"
+    ).eq("document_id", document_id).eq("owner_id", ctx.user_id).order("page_number").order("chunk_index").execute())
+    return {"document": document_to_dict(docs[0]), "chunks": chunks}
 
 
 @app.delete("/api/documents/{document_id}")
-def delete_document(document_id: str):
-    with db_lock, get_connection() as conn:
-        row = conn.execute("SELECT stored_filename FROM documents WHERE id = ?", (document_id,)).fetchone()
-        if row is None:
-            raise HTTPException(status_code=404, detail="Document not found.")
-        conn.execute("DELETE FROM chunks WHERE document_id = ?", (document_id,))
-        conn.execute("DELETE FROM documents WHERE id = ?", (document_id,))
-        conn.commit()
-    (UPLOAD_DIR / row["stored_filename"]).unlink(missing_ok=True)
-    try:
-        rebuild_vector_index()
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Document deleted, but vector index rebuild failed: {exc}") from exc
+def delete_document(document_id: str, ctx: AuthContext = Depends(require_user)):
+    docs = rows(ctx.client.table("documents").select(
+        "id,storage_path"
+    ).eq("id", document_id).eq("owner_id", ctx.user_id).limit(1).execute())
+    if not docs:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    storage_path = docs[0].get("storage_path")
+    ctx.client.table("documents").delete().eq("id", document_id).eq("owner_id", ctx.user_id).execute()
+    if storage_path:
+        try:
+            ctx.storage.from_(STORAGE_BUCKET).remove([storage_path])
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Metadata deleted but PDF cleanup failed: {exc}") from exc
     return {"message": "Document deleted successfully.", "document_id": document_id}
 
 
-def retrieve_chunks(query: str, top_k: int = TOP_K_DEFAULT):
-    """Search the existing FAISS index and return Phase 4-compatible passages."""
-    with vector_lock:
-        if faiss_index is None or not vector_mapping or faiss_index.ntotal == 0:
-            return []
-        query_vector = encode_texts([query])
-        k = min(top_k, faiss_index.ntotal)
-        scores, indices = faiss_index.search(query_vector, k)
-        results = []
-        for score, position in zip(scores[0].tolist(), indices[0].tolist()):
-            if position < 0 or position >= len(vector_mapping):
-                continue
-            item = vector_mapping[position]
-            results.append({
-                "document_id": item["document_id"],
-                "filename": item["filename"],
-                "page_number": item["page_number"],
-                "chunk_index": item["chunk_index"],
-                "content": item["content"],
-                "score": round(float(score), 4),
-            })
-    return results
+def retrieve_chunks(query: str, top_k: int, ctx: AuthContext):
+    vector = encode_texts([query])[0]
 
+    # Retrieve relevant chunks independently from every PDF.
+    per_document_k = max(1, min(int(top_k), 8))
 
-def retrieve_overview_chunks(limit: int = 8):
-    """Return the opening passages of the most recently uploaded PDF.
-
-    This is used for document-level questions such as "What is this paper about?",
-    where semantic similarity against a short generic question can be weak.
-    """
-    with get_connection() as conn:
-        document = conn.execute(
-            "SELECT id FROM documents ORDER BY uploaded_at DESC LIMIT 1"
-        ).fetchone()
-        if document is None:
-            return []
-
-        rows = conn.execute(
-            """SELECT c.document_id, d.filename, c.page_number,
-                      c.chunk_index, c.content
-               FROM chunks c
-               JOIN documents d ON d.id = c.document_id
-               WHERE c.document_id = ?
-               ORDER BY c.page_number ASC, c.chunk_index ASC
-               LIMIT ?""",
-            (document["id"], limit),
-        ).fetchall()
+    result = ctx.client.rpc(
+        "match_document_chunks_per_document",
+        {
+            "query_embedding": vector,
+            "match_count_per_document": per_document_k,
+        },
+    ).execute()
 
     return [
         {
-            "document_id": row["document_id"],
-            "filename": row["filename"],
-            "page_number": row["page_number"],
-            "chunk_index": row["chunk_index"],
-            "content": row["content"],
-            "score": 1.0,
+            "document_id": item["document_id"],
+            "filename": item["filename"],
+            "page_number": item["page_number"],
+            "chunk_index": item["chunk_index"],
+            "content": item["content"],
+            "score": round(float(item["similarity"]), 4),
         }
-        for row in rows
+        for item in rows(result)
     ]
 
 
+
+def retrieve_overview_chunks(ctx: AuthContext, limit: int = 4):
+    # Get every PDF belonging to the authenticated user.
+    docs = rows(
+        ctx.client.table("documents")
+        .select("id,filename")
+        .eq("owner_id", ctx.user_id)
+        .order("uploaded_at", desc=True)
+        .execute()
+    )
+
+    result = []
+
+    # Retrieve the opening chunks of every document.
+    for doc in docs:
+        chunks = rows(
+            ctx.client.table("document_chunks")
+            .select("document_id,page_number,chunk_index,content")
+            .eq("document_id", doc["id"])
+            .eq("owner_id", ctx.user_id)
+            .order("page_number")
+            .order("chunk_index")
+            .limit(limit)
+            .execute()
+        )
+
+        for item in chunks:
+            result.append({
+                "document_id": item["document_id"],
+                "filename": doc["filename"],
+                "page_number": item["page_number"],
+                "chunk_index": item["chunk_index"],
+                "content": item["content"],
+                "score": 1.0,
+            })
+
+    return result
+
+
+
 @app.post("/api/search")
-def semantic_search(request: SearchRequest):
-    query = request.query.strip()
-    if len(query) < 2:
-        raise HTTPException(status_code=400, detail="Enter a longer search query.")
-    results = retrieve_chunks(query, request.top_k)
+def semantic_search(request: SearchRequest, ctx: AuthContext = Depends(require_user)):
+    results = retrieve_chunks(request.query.strip(), request.top_k, ctx)
     message = f"Found {len(results)} relevant passage(s)." if results else "No indexed PDF chunks are available yet."
-    return {"query": query, "results": results, "message": message}
+    return {"query": request.query.strip(), "results": results, "message": message}
 
 
 @app.post("/api/chats")
-def create_chat():
+def create_chat(ctx: AuthContext = Depends(require_user)):
     chat_id = str(uuid4())
     now = datetime.now(timezone.utc).isoformat()
-    with db_lock, get_connection() as conn:
-        conn.execute("INSERT INTO chat_sessions VALUES (?, ?, ?, ?)",
-                     (chat_id, "New conversation", now, now))
-        conn.commit()
-    return {"id": chat_id, "title": "New conversation", "created_at": now, "updated_at": now}
+    record = {
+        "id": chat_id, "owner_id": ctx.user_id, "title": "New conversation",
+        "created_at": now, "updated_at": now,
+    }
+    ctx.client.table("chat_sessions").insert(record).execute()
+    return {k: record[k] for k in ("id", "title", "created_at", "updated_at")}
 
 
 @app.get("/api/chats")
-def list_chats():
-    with db_lock, get_connection() as conn:
-        rows = conn.execute("SELECT id, title, created_at, updated_at FROM chat_sessions ORDER BY updated_at DESC").fetchall()
-    return {"chats": [dict(row) for row in rows]}
+def list_chats(ctx: AuthContext = Depends(require_user)):
+    result = ctx.client.table("chat_sessions").select(
+        "id,title,created_at,updated_at"
+    ).eq("owner_id", ctx.user_id).order("updated_at", desc=True).execute()
+    return {"chats": rows(result)}
 
 
 @app.get("/api/chats/{chat_id}")
-def get_chat(chat_id: str):
-    with db_lock, get_connection() as conn:
-        session = conn.execute("SELECT id, title, created_at, updated_at FROM chat_sessions WHERE id = ?", (chat_id,)).fetchone()
-        if session is None:
-            raise HTTPException(status_code=404, detail="Conversation not found.")
-        rows = conn.execute("SELECT role, content, created_at FROM chat_messages WHERE chat_id = ? ORDER BY id", (chat_id,)).fetchall()
-    return {"chat": dict(session), "messages": [dict(row) for row in rows]}
+def get_chat(chat_id: str, ctx: AuthContext = Depends(require_user)):
+    sessions = rows(ctx.client.table("chat_sessions").select(
+        "id,title,created_at,updated_at"
+    ).eq("id", chat_id).eq("owner_id", ctx.user_id).limit(1).execute())
+    if not sessions:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    messages = rows(ctx.client.table("chat_messages").select(
+        "role,content,created_at"
+    ).eq("chat_id", chat_id).eq("owner_id", ctx.user_id).order("id").execute())
+    return {"chat": sessions[0], "messages": messages}
 
 
 @app.delete("/api/chats/{chat_id}")
-def delete_chat(chat_id: str):
-    with db_lock, get_connection() as conn:
-        cursor = conn.execute("DELETE FROM chat_sessions WHERE id = ?", (chat_id,))
-        conn.commit()
-        if cursor.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Conversation not found.")
+def delete_chat(chat_id: str, ctx: AuthContext = Depends(require_user)):
+    result = ctx.client.table("chat_sessions").delete().eq(
+        "id", chat_id
+    ).eq("owner_id", ctx.user_id).execute()
+    if not rows(result):
+        raise HTTPException(status_code=404, detail="Conversation not found.")
     return {"deleted": True, "id": chat_id}
 
 
 @app.post("/api/chat")
-def chat(request: ChatRequest):
-    """PDF-first agent with conditional DuckDuckGo search and conversation context."""
+def chat(request: ChatRequest, ctx: AuthContext = Depends(require_user)):
     question = request.question.strip()
     if len(question) < 2:
         raise HTTPException(status_code=400, detail="Enter a longer question.")
     chat_id = request.chat_id
     if not chat_id:
-        chat_id = create_chat()["id"]
+        chat_id = create_chat(ctx)["id"]
 
-    with db_lock, get_connection() as conn:
-        session = conn.execute("SELECT id FROM chat_sessions WHERE id = ?", (chat_id,)).fetchone()
-        if session is None:
-            raise HTTPException(status_code=404, detail="Conversation not found.")
-        stored_history = conn.execute(
-            "SELECT role, content FROM chat_messages WHERE chat_id = ? ORDER BY id", (chat_id,)
-        ).fetchall()
+    sessions = rows(ctx.client.table("chat_sessions").select("id,title").eq(
+        "id", chat_id
+    ).eq("owner_id", ctx.user_id).limit(1).execute())
+    if not sessions:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
 
-    history = [dict(row) for row in stored_history]
-    if not history:
-        history = [item.dict() for item in request.history]
+    stored = rows(
+        ctx.client.table("chat_messages")
+        .select("id,role,content")
+        .eq("chat_id", chat_id)
+        .eq("owner_id", ctx.user_id)
+        .order("id")
+        .execute()
+    )
 
-    try:
-        result = answer_question(
-            question=question,
-            history=history[-12:],
-            retrieve=retrieve_chunks,
-            top_k=max(request.top_k, 8),
-            retrieve_overview=retrieve_overview_chunks,
+    messages_to_replace = []
+
+    if request.edit_from_index is not None:
+
+        edit_index = request.edit_from_index
+
+        if edit_index >= len(stored):
+            raise HTTPException(
+                status_code=400,
+                detail="The message being edited no longer exists."
+            )
+
+        if stored[edit_index]["role"] != "user":
+            raise HTTPException(
+                status_code=400,
+                detail="You can only edit your own questions."
+            )
+
+        # Keep messages before the edited question.
+        history = [
+            {
+                "role": item["role"],
+                "content": item["content"]
+            }
+            for item in stored[:edit_index]
+        ]
+
+        # Mark the edited question and all following messages
+        # for replacement, but do not delete them yet.
+        messages_to_replace = stored[edit_index:]
+
+    else:
+        history = (
+            [
+                {
+                    "role": item["role"],
+                    "content": item["content"]
+                }
+                for item in stored
+            ]
+            if stored
+            else [item.model_dump() for item in request.history]
         )
 
+    try:
+        retrieve = lambda query, k: retrieve_chunks(query, k, ctx)
+        overview = lambda: retrieve_overview_chunks(ctx)
+        result = answer_question(
+            question=question, history=history[-12:], retrieve=retrieve,
+            top_k=max(request.top_k, 8), retrieve_overview=overview,
+        )
         now = datetime.now(timezone.utc).isoformat()
         title = question[:60] + ("…" if len(question) > 60 else "")
-        with db_lock, get_connection() as conn:
-            conn.execute(
-                "INSERT INTO chat_messages (chat_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-                (chat_id, "user", question, now),
-            )
-            conn.execute(
-                "INSERT INTO chat_messages (chat_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-                (chat_id, "assistant", result["answer"], now),
-            )
-            conn.execute(
-                "UPDATE chat_sessions SET title = CASE WHEN title = 'New conversation' THEN ? ELSE title END, updated_at = ? WHERE id = ?",
-                (title, now, chat_id),
-            )
-            conn.commit()
+                # Replace the edited message and every message after it.
+        # This happens only after a new AI answer was generated.
+        if messages_to_replace:
 
-        document_sources = []
-        seen = set()
+            old_ids = [
+                item["id"]
+                for item in messages_to_replace
+            ]
+
+            ctx.client.table("chat_messages").delete().eq(
+                "chat_id", chat_id
+            ).eq(
+                "owner_id", ctx.user_id
+            ).in_(
+                "id", old_ids
+            ).execute()
+        ctx.client.table("chat_messages").insert([
+            {"chat_id": chat_id, "owner_id": ctx.user_id, "role": "user", "content": question, "created_at": now},
+            {"chat_id": chat_id, "owner_id": ctx.user_id, "role": "assistant", "content": result["answer"], "created_at": now},
+        ]).execute()
+        update = {"updated_at": now}
+        if sessions[0]["title"] == "New conversation":
+            update["title"] = title
+        ctx.client.table("chat_sessions").update(update).eq(
+            "id", chat_id
+        ).eq("owner_id", ctx.user_id).execute()
+
+        document_sources, seen = [], set()
         for item in result["document_chunks"]:
             key = (item["document_id"], item["page_number"])
             if key not in seen:
                 seen.add(key)
                 document_sources.append({
-                    "document_id": item["document_id"],
-                    "filename": item["filename"],
-                    "page_number": item["page_number"],
-                    "score": item.get("score", 0),
+                    "document_id": item["document_id"], "filename": item["filename"],
+                    "page_number": item["page_number"], "score": item.get("score", 0),
                 })
         return {
-            "chat_id": chat_id,
-            "answer": result["answer"],
-            "mode": result["mode"],
-            "document_sources": document_sources,
-            "web_sources": result["web_sources"],
+            "chat_id": chat_id, "answer": result["answer"], "mode": result["mode"],
+            "document_sources": document_sources, "web_sources": result["web_sources"],
             "used_web_search": result["used_web_search"],
             "retrieved_count": len(result["document_chunks"]),
             "suggested_questions": result["suggested_questions"],
@@ -569,10 +725,12 @@ def chat(request: ChatRequest):
 
 
 @app.get("/api/search/status")
-def search_status():
-    with vector_lock:
-        return {
-            "indexed_chunks": int(faiss_index.ntotal) if faiss_index is not None else 0,
-            "model": MODEL_NAME,
-            "index_exists": INDEX_PATH.exists(),
-        }
+def search_status(ctx: AuthContext = Depends(require_user)):
+    result = ctx.client.table("document_chunks").select(
+        "id", count="exact"
+    ).eq("owner_id", ctx.user_id).limit(1).execute()
+    count = result.count or 0
+    return {
+        "indexed_chunks": count, "model": MODEL_NAME,
+        "index_exists": count > 0, "vector_store": "supabase_pgvector",
+    }

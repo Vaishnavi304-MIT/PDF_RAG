@@ -1,5 +1,4 @@
 
-"""DuckDuckGo search adapter (no LangChain)."""
 
 from __future__ import annotations
 
@@ -12,7 +11,7 @@ def _cached_search(query: str, max_results: int):
     from ddgs import DDGS
 
     try:
-        # Use the same configuration as the successful standalone test.
+       
         rows = DDGS().text(
             query,
             max_results=max_results

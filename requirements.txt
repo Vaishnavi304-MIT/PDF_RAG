@@ -5,9 +5,8 @@ python-dotenv
 python-multipart
 PyMuPDF
 sentence-transformers
-faiss-cpu
 numpy
 groq
+supabase
 ddgs
-react-markdown 
-remark-gfm
+

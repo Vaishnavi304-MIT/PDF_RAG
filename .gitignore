@@ -36,3 +36,10 @@ services/__pycache__
 *.log
 
 .env
+backend/data/
+backend/.cache/
+*.db
+*.sqlite
+*.index
+
+node_modules

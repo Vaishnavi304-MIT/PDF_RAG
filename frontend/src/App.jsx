@@ -1,15 +1,255 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import "../markdown.css";
+import { supabase, apiFetch } from "./supabase";
+import { Turnstile } from "@marsidev/react-turnstile";
+
 
 import { useEffect, useRef, useState } from "react";
 import {
   Sparkles, Plus, FileText, Search, Settings, PanelLeftClose,
   Paperclip, Send, Globe2, Database, X, FileUp, Menu, User,
-  Trash2, RefreshCw, CheckCircle2, ArrowLeft, SearchCheck, MessageSquare
+  Trash2, RefreshCw, CheckCircle2, ArrowLeft, SearchCheck,
+  MessageSquare, Copy, Pencil, Check
 } from "lucide-react";
 
 const API = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
+
+function AuthScreen() {
+  const [mode, setMode] = useState("signin");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [captchaToken, setCaptchaToken] = useState("");
+  const turnstileSiteKey = import.meta.env.VITE_TURNSTILE_SITE_KEY;
+
+  async function signInWithGoogle() {
+    setNotice("");
+    setBusy(true);
+
+    try {
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: "google",
+        options: {
+          redirectTo: window.location.origin,
+        },
+      });
+
+      if (error) throw error;
+      // Supabase redirects the browser to Google's consent screen.
+    } catch (error) {
+      setNotice(error.message || "Google sign-in could not be started.");
+      setBusy(false);
+    }
+  }
+
+  async function submit(event) {
+    event.preventDefault();
+    setNotice("");
+
+    if (!email.trim() || !password) {
+      setNotice("Enter your email address and password.");
+      return;
+    }
+
+    // CAPTCHA is required only for email/password SIGN-IN.
+    // Public email registration intentionally does not require CAPTCHA.
+    if (mode === "signin" && (!turnstileSiteKey || !captchaToken)) {
+      setNotice(
+        !turnstileSiteKey
+          ? "Email sign-in CAPTCHA is not configured. Set VITE_TURNSTILE_SITE_KEY."
+          : "Complete the Cloudflare check before signing in."
+      );
+      return;
+    }
+
+    setBusy(true);
+
+    try {
+      if (mode === "signup") {
+        // Correct Supabase JS v2 signature: one object argument.
+        const { data, error } = await supabase.auth.signUp({
+          email: email.trim(),
+          password,
+        });
+
+        if (error) throw error;
+
+        setNotice(
+          data.session
+            ? "Account created. You are now signed in."
+            : "Account created. Check your email to confirm your address, then sign in."
+        );
+
+        if (!data.session) {
+          setMode("signin");
+          setCaptchaToken("");
+        }
+      } else {
+        // Verify Turnstile only for email/password sign-in.
+        // Supabase global CAPTCHA is disabled so signup and Google OAuth remain CAPTCHA-free.
+        const verifyResponse = await fetch(`${API}/api/auth/verify-captcha`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token: captchaToken }),
+        });
+        const verification = await verifyResponse.json().catch(() => ({}));
+        if (!verifyResponse.ok || verification.verified !== true) {
+          throw new Error(verification.detail || "Cloudflare verification failed. Please try again.");
+        }
+
+        const { error } = await supabase.auth.signInWithPassword({
+          email: email.trim(),
+          password,
+        });
+
+        if (error) throw error;
+        // The parent App component observes the Supabase session and opens the workspace.
+      }
+    } catch (error) {
+      setNotice(error.message || "Authentication failed.");
+    } finally {
+      setBusy(false);
+      setCaptchaToken("");
+    }
+  }
+
+  function switchMode() {
+    setMode(current => current === "signin" ? "signup" : "signin");
+    setNotice("");
+    setCaptchaToken("");
+  }
+
+  return (
+    <main style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: 24, background: "#f7f8fc" }}>
+      <form onSubmit={submit} style={{ width: "100%", maxWidth: 420, padding: 32, borderRadius: 20, background: "#fff", boxShadow: "0 12px 40px rgba(15,23,42,.08)", display: "grid", gap: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ width: 42, height: 42, borderRadius: 12, display: "grid", placeItems: "center", background: "#eef2ff", color: "#4f46e5" }}>
+            <Sparkles size={22}/>
+          </div>
+          <div>
+            <h1 style={{ margin: 0, fontSize: 22, color: "#111827" }}>IntelliDoc AI</h1>
+            <p style={{ margin: "3px 0 0", color: "#64748b", fontSize: 13 }}>Your secure knowledge assistant</p>
+          </div>
+        </div>
+
+        <h2 style={{ margin: "8px 0 0", fontSize: 19, color: "#111827" }}>
+          {mode === "signin" ? "Welcome back" : "Create your account"}
+        </h2>
+
+        <label style={{ display: "grid", gap: 7, color: "#374151", fontSize: 14 }}>
+          Email
+          <input
+            type="email"
+            required
+            autoComplete="email"
+            value={email}
+            onChange={e => setEmail(e.target.value)}
+            placeholder="you@example.com"
+            style={{ padding: 12, border: "1px solid #dbe1ea", borderRadius: 9, fontSize: 14 }}
+          />
+        </label>
+
+        <label style={{ display: "grid", gap: 7, color: "#374151", fontSize: 14 }}>
+          Password
+          <input
+            type="password"
+            required
+            minLength={6}
+            autoComplete={mode === "signin" ? "current-password" : "new-password"}
+            value={password}
+            onChange={e => setPassword(e.target.value)}
+            placeholder="At least 6 characters"
+            style={{ padding: 12, border: "1px solid #dbe1ea", borderRadius: 9, fontSize: 14 }}
+          />
+        </label>
+
+        {mode === "signin" && (
+          <div>
+            {turnstileSiteKey ? (
+              <Turnstile
+                key="email-signin-turnstile"
+                siteKey={turnstileSiteKey}
+                onSuccess={token => { setCaptchaToken(token); setNotice(""); }}
+                onExpire={() => setCaptchaToken("")}
+                onError={() => {
+                  setCaptchaToken("");
+                  setNotice("Cloudflare verification failed. Check the Turnstile hostname and sitekey.");
+                }}
+                options={{ theme: "auto", retry: "auto" }}
+              />
+            ) : (
+              <p role="alert" style={{ margin: "8px 0 0", color: "#b45309", fontSize: 12 }}>
+                Email sign-in CAPTCHA is not configured. Add VITE_TURNSTILE_SITE_KEY to frontend/.env.local.
+              </p>
+            )}
+          </div>
+        )}
+
+        {notice && (
+          <p role="status" style={{ margin: 0, padding: 11, borderRadius: 8, background: "#f1f5f9", color: "#334155", fontSize: 13 }}>
+            {notice}
+          </p>
+        )}
+
+        <button
+          type="submit"
+          disabled={busy || (mode === "signin" && (!captchaToken || !turnstileSiteKey))}
+          style={{
+            padding: 13,
+            border: 0,
+            borderRadius: 9,
+            background: "#4f46e5",
+            color: "#fff",
+            fontWeight: 600,
+            cursor: busy ? "not-allowed" : "pointer",
+            opacity: busy || (mode === "signin" && !captchaToken) ? 0.65 : 1
+          }}
+        >
+          {busy ? "Please wait…" : mode === "signin" ? "Sign in with email" : "Create account"}
+        </button>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 12, color: "#94a3b8", fontSize: 12 }}>
+          <span style={{ height: 1, background: "#e2e8f0", flex: 1 }} />
+          OR
+          <span style={{ height: 1, background: "#e2e8f0", flex: 1 }} />
+        </div>
+
+        <button
+          type="button"
+          disabled={busy}
+          onClick={signInWithGoogle}
+          style={{
+            padding: 12,
+            border: "1px solid #dbe1ea",
+            borderRadius: 9,
+            background: "#fff",
+            color: "#1f2937",
+            fontWeight: 600,
+            cursor: busy ? "not-allowed" : "pointer",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 10
+          }}
+        >
+          <span aria-hidden="true" style={{ fontWeight: 700, fontSize: 18, color: "#4285F4" }}>G</span>
+          Continue with Google
+        </button>
+
+        <button
+          type="button"
+          disabled={busy}
+          onClick={switchMode}
+          style={{ border: 0, background: "transparent", color: "#4f46e5", cursor: "pointer" }}
+        >
+          {mode === "signin" ? "New here? Create an account" : "Already have an account? Sign in"}
+        </button>
+      </form>
+    </main>
+  );
+}
 
 const prompts = [
   "Summarize my document",
@@ -23,6 +263,8 @@ const formatSize = bytes =>
     : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 
 export default function App() {
+  const [session, setSession] = useState(null);
+  const [authReady, setAuthReady] = useState(false);
   const [apiStatus, setApiStatus] = useState("checking");
   const [message, setMessage] = useState("");
   const [messages, setMessages] = useState([]);
@@ -45,15 +287,44 @@ export default function App() {
 
   const picker = useRef(null);
   const endRef = useRef(null);
+  const [copiedMessage, setCopiedMessage] = useState(null);
+  const [editingMessage, setEditingMessage] = useState(null);
+
+  async function copyMessage(content, id) {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopiedMessage(id);
+
+      setTimeout(() => {
+        setCopiedMessage(null);
+      }, 1800);
+    } catch {
+      setNotice("Could not copy this message. Check browser permissions.");
+    }
+  }
+
+  function editMessage(content, index) {
+    setMessage(content);
+    setEditingMessage(index);
+
+    // Move focus to the message composer.
+    requestAnimationFrame(() => {
+      document.querySelector(".composer textarea")?.focus();
+    });
+  }
 
   async function loadDocuments() {
     setLoadingDocs(true);
 
     try {
-      const response = await fetch(`${API}/api/documents`);
+      const response = await apiFetch(`${API}/api/documents`);
 
       if (!response.ok) {
-        throw new Error("Could not load documents.");
+        const errorData = await response.json().catch(() => ({}));
+        console.error("GET /api/documents failed:", response.status, errorData);
+        throw new Error(
+          errorData.detail || `Could not load documents (HTTP ${response.status}).`
+        );
       }
 
       const data = await response.json();
@@ -68,7 +339,7 @@ export default function App() {
 
   async function loadSearchStatus() {
     try {
-      const response = await fetch(`${API}/api/search/status`);
+      const response = await apiFetch(`${API}/api/search/status`);
 
       if (response.ok) {
         const data = await response.json();
@@ -81,6 +352,7 @@ export default function App() {
 
   async function checkApi() {
     try {
+      // /health is public and must not depend on a browser auth session.
       const response = await fetch(`${API}/health`);
 
       if (!response.ok) {
@@ -105,15 +377,55 @@ export default function App() {
     }
   }
 
-  // UPDATED: Safe initialization effect
+  // Subscribe before reading persisted auth state so an OAuth/refresh event
+  // cannot be overwritten by a slower getSession() result.
   useEffect(() => {
+    let mounted = true;
+    let authEventReceived = false;
+
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      authEventReceived = true;
+      if (mounted) {
+        setSession(nextSession);
+        setAuthReady(true);
+      }
+    });
+
+    supabase.auth.getSession().then(({ data, error }) => {
+      if (!mounted || authEventReceived) return;
+      if (error) {
+        console.error("Could not restore Supabase session:", error.message);
+      }
+      setSession(data?.session ?? null);
+      setAuthReady(true);
+    }).catch((error) => {
+      if (!mounted || authEventReceived) return;
+      console.error("Could not restore Supabase session:", error);
+      setSession(null);
+      setAuthReady(true);
+    });
+
+    return () => {
+      mounted = false;
+      listener.subscription.unsubscribe();
+    };
+  }, []);
+
+  // Load each user's workspace only after Supabase Auth has restored a session.
+  useEffect(() => {
+    if (!session) {
+      setDocuments([]);
+      setChatSessions([]);
+      setMessages([]);
+      setChatId(null);
+      return;
+    }
     const initializeApp = async () => {
       await checkApi();
       await loadChats();
     };
-
     initializeApp();
-  }, []);
+  }, [session?.user?.id]);
 
   // UPDATED: Safe message scrolling effect
   useEffect(() => {
@@ -127,7 +439,7 @@ export default function App() {
 
   async function loadChats() {
     try {
-      const response = await fetch(`${API}/api/chats`);
+      const response = await apiFetch(`${API}/api/chats`);
       if (!response.ok) return;
       const data = await response.json();
       const chats = data.chats || [];
@@ -144,7 +456,7 @@ export default function App() {
 
   async function createNewChat() {
     try {
-      const response = await fetch(`${API}/api/chats`, { method: "POST" });
+      const response = await apiFetch(`${API}/api/chats`, { method: "POST" });
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || "Could not create conversation.");
       setChatId(data.id);
@@ -165,7 +477,7 @@ export default function App() {
 
   async function loadChatListOnly() {
     try {
-      const response = await fetch(`${API}/api/chats`);
+      const response = await apiFetch(`${API}/api/chats`);
       if (response.ok) {
         const data = await response.json();
         setChatSessions(data.chats || []);
@@ -177,7 +489,7 @@ export default function App() {
 
   async function openChat(id) {
     try {
-      const response = await fetch(`${API}/api/chats/${id}`);
+      const response = await apiFetch(`${API}/api/chats/${id}`);
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || "Could not open conversation.");
       setChatId(id);
@@ -197,7 +509,7 @@ export default function App() {
     event?.stopPropagation();
     if (!window.confirm("Delete this conversation and its messages? Your uploaded PDFs will not be deleted.")) return;
     try {
-      const response = await fetch(`${API}/api/chats/${id}`, { method: "DELETE" });
+      const response = await apiFetch(`${API}/api/chats/${id}`, { method: "DELETE" });
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || "Could not delete conversation.");
       const remaining = chatSessions.filter(chat => chat.id !== id);
@@ -242,7 +554,7 @@ export default function App() {
     let successes = 0;
 
     for (const file of selected) {
-      if (file.size > 20 * 1024 * 1024) {
+      if (file.size > 50 * 1024 * 1024) {
         setNotice(`${file.name} exceeds the 20 MB limit.`);
         continue;
       }
@@ -251,7 +563,7 @@ export default function App() {
       form.append("file", file);
 
       try {
-        const response = await fetch(
+        const response = await apiFetch(
           `${API}/api/documents/upload`,
           {
             method: "POST",
@@ -304,7 +616,7 @@ export default function App() {
     }
 
     try {
-      const response = await fetch(
+      const response = await apiFetch(
         `${API}/api/documents/${id}`,
         { method: "DELETE" }
       );
@@ -338,7 +650,7 @@ export default function App() {
     setSearchResults([]);
 
     try {
-      const response = await fetch(`${API}/api/search`, {
+      const response = await apiFetch(`${API}/api/search`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
@@ -369,109 +681,110 @@ export default function App() {
 
   async function send(text = message) {
     const value = text.trim();
-
     if (!value || isSending) return;
 
-    const history = messages
-      .filter(
-        item =>
-          !item.loading &&
-          (item.role === "user" || item.role === "assistant")
+    // A non-null index means the user is editing an existing question.
+    const editIndex = editingMessage;
+    const previousMessages = messages;
+
+    // The AI receives only the conversation before the edited question.
+    const conversationBeforeEdit =
+      editIndex !== null ? messages.slice(0, editIndex) : messages;
+
+    const history = conversationBeforeEdit
+      .filter(item =>
+        !item.loading &&
+        (item.role === "user" || item.role === "assistant")
       )
-      .slice(-8)
-      .map(({ role, content }) => ({
-        role,
-        content
-      }));
+      .slice(-12)
+      .map(({ role, content }) => ({ role, content }));
 
-    setMessages(old => [
-      ...old,
-      {
-        role: "user",
-        content: value
-      },
-      {
-        role: "assistant",
-        content: "",
-        loading: true
-      }
-    ]);
+    const replacementMessages = [
+      { role: "user", content: value },
+      { role: "assistant", content: "", loading: true }
+    ];
 
-    setTitle(
-      value.length > 32
-        ? value.slice(0, 32) + "…"
-        : value
+    // Show the edited turn in its original position and discard later turns.
+    setMessages(
+      editIndex !== null
+        ? [...messages.slice(0, editIndex), ...replacementMessages]
+        : [...messages, ...replacementMessages]
     );
 
+    setTitle(value.length > 32 ? value.slice(0, 32) + "…" : value);
     setMessage("");
+    setEditingMessage(null);
     setIsSending(true);
+    setNotice("");
 
     try {
-      const response = await fetch(`${API}/api/chat`, {
+      const response = await apiFetch(`${API}/api/chat`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           question: value,
           chat_id: chatId,
           history,
-          top_k: 5
+          top_k: 8,
+          edit_from_index: editIndex
         })
       });
 
-      // UPDATED: Handle invalid JSON responses safely
-      let data;
-
-      try {
-        data = await response.json();
-      } catch {
-        throw new Error(
-          "Backend returned an invalid response."
-        );
-      }
+      const data = await response.json().catch(() => {
+        throw new Error("Backend returned an invalid response.");
+      });
 
       if (!response.ok) {
-        throw new Error(
-          data.detail || "Could not generate an answer."
-        );
+        throw new Error(data.detail || "Could not generate an answer.");
       }
 
       if (data.chat_id && !chatId) setChatId(data.chat_id);
+
+      // Replace the temporary loading row with the new AI answer.
+      setMessages(current => {
+        const updated = [...current];
+        const lastIndex = updated.length - 1;
+        updated[lastIndex] = {
+          role: "assistant",
+          content: data.answer,
+          mode: data.mode,
+          document_sources: data.document_sources || [],
+          web_sources: data.web_sources || [],
+          suggested_questions: data.suggested_questions || []
+        };
+        return updated;
+      });
+
       await loadChatListOnly();
-
-      setMessages(old =>
-        old.map((item, index) =>
-          index === old.length - 1
-            ? {
-                role: "assistant",
-                content: data.answer,
-                mode: data.mode,
-                document_sources: data.document_sources || [],
-                web_sources: data.web_sources || [],
-                suggested_questions: data.suggested_questions || []
-              }
-            : item
-        )
-      );
-
     } catch (error) {
-      setMessages(old =>
-        old.map((item, index) =>
-          index === old.length - 1
-            ? {
-                role: "assistant",
-                content: `I couldn't complete that request. ${error.message}`,
-                mode: "error"
-              }
-            : item
-        )
-      );
-
+      // Restore the original conversation if an edit cannot be regenerated.
+      if (editIndex !== null) {
+        setMessages(previousMessages);
+        setMessage(value);
+        setEditingMessage(editIndex);
+      } else {
+        setMessages(current =>
+          current.map((item, index) =>
+            index === current.length - 1
+              ? {
+                  role: "assistant",
+                  content: `I couldn't complete that request. ${error.message}`,
+                  mode: "error"
+                }
+              : item
+          )
+        );
+      }
+      setNotice(error.message || "Could not generate an answer.");
     } finally {
       setIsSending(false);
     }
   }
+
+  if (!authReady) {
+    return <main style={{ minHeight: "100vh", display: "grid", placeItems: "center", color: "#64748b" }}>Loading secure workspace…</main>;
+  }
+  if (!session) return <AuthScreen />;
 
   return (
     <div className="shell">
@@ -604,12 +917,14 @@ export default function App() {
           </div>
 
           <div className="profile">
-            <div className="avatar">U</div>
-            <div>
+            <div className="avatar"><User size={16}/></div>
+            <div style={{ minWidth: 0 }}>
               <b>Workspace</b>
-              <small>Local development</small>
+              <small title={session?.user?.email}>{session?.user?.email || "Signed in"}</small>
             </div>
-            <Settings size={17} />
+            <button className="icon-btn" title="Sign out" onClick={() => supabase.auth.signOut()}>
+              <ArrowLeft size={16}/>
+            </button>
           </div>
 
         </aside>
@@ -956,9 +1271,37 @@ export default function App() {
                             ? "IntelliDoc AI"
                             : "You"}
                         </b>
+                        <div className="message-actions">
+
+                        <button
+                          type="button"
+                          className="message-action"
+                          onClick={() => copyMessage(m.content, i)}
+                          disabled={!m.content || m.loading}
+                          title="Copy message"
+                        >
+                          {copiedMessage === i
+                            ? <Check size={14} />
+                            : <Copy size={14} />}
+                          {copiedMessage === i ? "Copied" : "Copy"}
+                        </button>
+
+                        {m.role === "user" && !m.loading && (
+                          <button
+                            type="button"
+                            className="message-action"
+                            onClick={() => editMessage(m.content, i)}
+                            title="Edit question"
+                          >
+                            <Pencil size={14} />
+                            Edit
+                          </button>
+                        )}
+
+                      </div>
 
                         {m.loading ? (
-                          <p>Thinking… searching your PDFs and preparing an answer…</p>
+                          <p>Thinking…</p>
                         ) : (
                           
                             <div className="markdown-answer">
@@ -969,29 +1312,10 @@ export default function App() {
 
                         )}
                         
-                        {/*
-                        {m.mode && (
-                          <small className="source">
-                            {m.mode === "documents"
-                              ? "Answered from your PDFs"
-                              : m.mode === "hybrid"
-                                ? "PDF context + DuckDuckGo research"
-                                : m.mode === "web_and_knowledge"
-                                ? (m.web_sources?.length
-                                  ? "General knowledge + DuckDuckGo web search"
-                                  : "General knowledge · Web search unavailable")
-                                : m.mode === "error"
-                                  ? "Request error"
-                                  : ""}
-                          </small>
-                        )}
-
-                        {m.document_sources?.length > 0 && (
-
+                        {m.sources?.length > 0 && (
                           <div className="message-sources">
-                            <b>Document sources</b>
-
-                            {m.document_sources.map((source, j) => (
+                            <b>Sources</b>
+                            {m.sources.map((source, j) => (
                               <span
                                 key={`${source.document_id}-${source.page_number}-${j}`}
                               >
@@ -1001,27 +1325,6 @@ export default function App() {
 
                           </div>
                         )}
-
-                        {m.web_sources?.length > 0 && (
-
-                          <div className="message-sources">
-                            <b>Web sources</b>
-
-                            {m.web_sources.map((source, j) => (
-                              <a
-                                key={`${source.url}-${j}`}
-                                href={source.url}
-                                target="_blank"
-                                rel="noreferrer"
-                              >
-                                {source.title} ↗
-                              </a>
-                            ))}
-
-                          </div>
-                        )}
-
-                        */}
 
                         {m.suggested_questions?.length > 0 && i === messages.length - 1 && (
                           <div className="suggested-questions">
@@ -1056,7 +1359,21 @@ export default function App() {
                   </button>
                 </div>
               )}
+              {editingMessage !== null && (
+                <div className="editing-indicator">
+                  <span>Editing your question</span>
 
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingMessage(null);
+                      setMessage("");
+                    }}
+                  >
+                    Cancel <X size={13} />
+                  </button>
+                </div>
+              )}
               <div className="composer">
 
                 <button
@@ -1101,7 +1418,7 @@ export default function App() {
                   <FileUp size={13} />
                   {uploading
                     ? "Uploading, embedding and indexing…"
-                    : "Upload PDF · Max 20 MB each"}
+                    : "Upload PDF · Max 50 MB each"}
                 </span>
 
                 <span>
