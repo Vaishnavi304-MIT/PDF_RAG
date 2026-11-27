@@ -23,7 +23,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 
 # Copy backend application
-COPY backend/app/ ./app/
+COPY backend/app/app/ ../app/
 
 
 EXPOSE 8000
