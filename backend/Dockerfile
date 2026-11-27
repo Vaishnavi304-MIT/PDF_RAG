@@ -1,4 +1,3 @@
-
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -16,15 +15,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN python -m pip install --upgrade pip
 
-# Copy root requirements file
+# requirements.txt is at the repository root (build context root)
 COPY requirements.txt ./requirements.txt
-
 RUN pip install --no-cache-dir -r requirements.txt
 
-
-# Copy backend application
+# backend/app/ and backend/migrate_sqlite_to_supabase.py are relative to repo root
 COPY backend/app/ ./app/
-
 COPY backend/migrate_sqlite_to_supabase.py ./migrate_sqlite_to_supabase.py
 
 EXPOSE 8000
