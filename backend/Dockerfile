@@ -25,7 +25,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy backend application
 COPY backend/app/ ./app/
 
-COPY backend/config.jsonc ./config.jsonc
 
 EXPOSE 8000
 
