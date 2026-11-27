@@ -24,7 +24,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy backend application
 COPY backend/app/ ./app/
-COPY backend/migrate_sqlite_to_supabase.py ./
+
+COPY backend/config.jsonc ./config.jsonc
+COPY backend/migrate_sqlite_to_supabase.py ./migrate_sqlite_to_supabase.py
 
 EXPOSE 8000
 
