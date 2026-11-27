@@ -43,4 +43,5 @@ backend/.cache/
 *.index
 
 node_modules
-.env.local
+.env
+config.jsonc

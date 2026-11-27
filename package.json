@@ -1,5 +1,8 @@
 {
   "dependencies": {
     "@marsidev/react-turnstile": "^1.6.3"
+  },
+  "devDependencies": {
+    "supabase": "^3.4.0"
   }
 }

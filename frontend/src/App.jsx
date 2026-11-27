@@ -21,7 +21,10 @@ function AuthScreen() {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  const [captchaNotice, setCaptchaNotice] = useState("");
   const [captchaToken, setCaptchaToken] = useState("");
+  const turnstileRef = useRef(null);
+  const submitInProgressRef = useRef(false);
   const turnstileSiteKey = import.meta.env.VITE_TURNSTILE_SITE_KEY;
 
   async function signInWithGoogle() {
@@ -44,9 +47,34 @@ function AuthScreen() {
     }
   }
 
+  async function resendConfirmation() {
+    if (!email.trim()) {
+      setNotice("Enter your email address first.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const { error } = await supabase.auth.resend({
+        type: "signup",
+        email: email.trim(),
+        options: { emailRedirectTo: window.location.origin },
+      });
+      if (error) throw error;
+      setNotice("Confirmation email sent. Check your inbox and spam folder, then return here to sign in.");
+    } catch (error) {
+      setNotice(error.message || "Could not resend the confirmation email.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function submit(event) {
     event.preventDefault();
-    setNotice("");
+
+    // Prevent duplicate requests while this attempt is running.
+    if (submitInProgressRef.current) return;
+
+    setCaptchaNotice("");
 
     if (!email.trim() || !password) {
       setNotice("Enter your email address and password.");
@@ -54,9 +82,9 @@ function AuthScreen() {
     }
 
     // CAPTCHA is required only for email/password SIGN-IN.
-    // Public email registration intentionally does not require CAPTCHA.
+    // Signup intentionally remains CAPTCHA-free.
     if (mode === "signin" && (!turnstileSiteKey || !captchaToken)) {
-      setNotice(
+      setCaptchaNotice(
         !turnstileSiteKey
           ? "Email sign-in CAPTCHA is not configured. Set VITE_TURNSTILE_SITE_KEY."
           : "Complete the Cloudflare check before signing in."
@@ -64,11 +92,11 @@ function AuthScreen() {
       return;
     }
 
+    submitInProgressRef.current = true;
     setBusy(true);
 
     try {
       if (mode === "signup") {
-        // Correct Supabase JS v2 signature: one object argument.
         const { data, error } = await supabase.auth.signUp({
           email: email.trim(),
           password,
@@ -76,48 +104,68 @@ function AuthScreen() {
 
         if (error) throw error;
 
+        const alreadyRegistered = Boolean(
+          data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0
+        );
         setNotice(
           data.session
             ? "Account created. You are now signed in."
-            : "Account created. Check your email to confirm your address, then sign in."
+            : alreadyRegistered
+              ? "An account with this email may already exist. Try signing in, or resend the confirmation email if the account is not confirmed."
+              : "Account created. Confirm your email using the link we sent, then sign in. You can resend the confirmation email below."
         );
 
         if (!data.session) {
           setMode("signin");
-          setCaptchaToken("");
         }
       } else {
-        // Verify Turnstile only for email/password sign-in.
-        // Supabase global CAPTCHA is disabled so signup and Google OAuth remain CAPTCHA-free.
+        // Verify the single-use Turnstile token exactly once per login attempt.
         const verifyResponse = await fetch(`${API}/api/auth/verify-captcha`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ token: captchaToken }),
         });
+
         const verification = await verifyResponse.json().catch(() => ({}));
         if (!verifyResponse.ok || verification.verified !== true) {
-          throw new Error(verification.detail || "Cloudflare verification failed. Please try again.");
+          throw new Error(
+            verification.detail || "Cloudflare verification failed. Please try again."
+          );
         }
 
+        // Do not pass captchaToken here: FastAPI has already verified it.
         const { error } = await supabase.auth.signInWithPassword({
           email: email.trim(),
           password,
         });
 
-        if (error) throw error;
-        // The parent App component observes the Supabase session and opens the workspace.
+        if (error) {
+          if (error.code === "email_not_confirmed" || /email not confirmed/i.test(error.message || "")) {
+            throw new Error("Your email address is not confirmed yet. Use the 'Resend confirmation email' option below, then sign in.");
+          }
+          throw error;
+        }
       }
     } catch (error) {
       setNotice(error.message || "Authentication failed.");
     } finally {
+      // Always unlock the form, including after an incorrect password/API error.
+      submitInProgressRef.current = false;
       setBusy(false);
-      setCaptchaToken("");
+
+      // Turnstile tokens are single-use. Reset after each email login attempt
+      // so the user can complete a fresh challenge before retrying.
+      if (mode === "signin") {
+        setCaptchaToken("");
+        turnstileRef.current?.reset();
+      }
     }
   }
 
   function switchMode() {
     setMode(current => current === "signin" ? "signup" : "signin");
     setNotice("");
+    setCaptchaNotice("");
     setCaptchaToken("");
   }
 
@@ -169,13 +217,14 @@ function AuthScreen() {
           <div>
             {turnstileSiteKey ? (
               <Turnstile
+                ref={turnstileRef}
                 key="email-signin-turnstile"
                 siteKey={turnstileSiteKey}
-                onSuccess={token => { setCaptchaToken(token); setNotice(""); }}
+                onSuccess={token => { setCaptchaToken(token); setCaptchaNotice(""); }}
                 onExpire={() => setCaptchaToken("")}
                 onError={() => {
                   setCaptchaToken("");
-                  setNotice("Cloudflare verification failed. Check the Turnstile hostname and sitekey.");
+                  setCaptchaNotice("Cloudflare verification failed. Check the Turnstile hostname and sitekey.");
                 }}
                 options={{ theme: "auto", retry: "auto" }}
               />
@@ -191,6 +240,17 @@ function AuthScreen() {
           <p role="status" style={{ margin: 0, padding: 11, borderRadius: 8, background: "#f1f5f9", color: "#334155", fontSize: 13 }}>
             {notice}
           </p>
+        )}
+        {captchaNotice && (
+          <p role="alert" style={{ margin: 0, padding: 10, borderRadius: 8, background: "#fff7ed", color: "#9a3412", fontSize: 13 }}>
+            {captchaNotice}
+          </p>
+        )}
+        {mode === "signin" && notice && /confirm|confirmation|not confirmed|Account created/i.test(notice) && (
+          <button type="button" disabled={busy} onClick={resendConfirmation}
+            style={{ border: 0, background: "transparent", color: "#4f46e5", cursor: busy ? "not-allowed" : "pointer", fontSize: 13 }}>
+            Resend confirmation email
+          </button>
         )}
 
         <button
@@ -289,6 +349,32 @@ export default function App() {
   const endRef = useRef(null);
   const [copiedMessage, setCopiedMessage] = useState(null);
   const [editingMessage, setEditingMessage] = useState(null);
+
+  async function deleteAccount() {
+    const confirmed = window.confirm(
+      "Permanently delete your IntelliDoc AI account, uploaded PDFs, document indexes, and chat history? This cannot be undone."
+    );
+    if (!confirmed) return;
+    const typed = window.prompt('Type DELETE to permanently remove your account:');
+    if (typed !== "DELETE") {
+      setNotice("Account deletion cancelled. Type DELETE exactly to confirm.");
+      return;
+    }
+    setNotice("Deleting your account and data…");
+    try {
+      // The Edge Function validates the current user's session and performs
+      // privileged cleanup server-side. No service-role key is exposed here.
+      const { data, error } = await supabase.functions.invoke("delete-account", {
+        method: "POST",
+      });
+      if (error) throw new Error(error.message || "Account deletion failed.");
+      if (!data?.deleted) throw new Error(data?.error || "Account deletion could not be confirmed.");
+      await supabase.auth.signOut();
+      setNotice("");
+    } catch (error) {
+      setNotice(error.message || "Could not delete your account.");
+    }
+  }
 
   async function copyMessage(content, id) {
     try {
@@ -839,6 +925,13 @@ export default function App() {
             <Search size={17} /> Semantic search
           </button>
 
+          <button
+            className={`nav ${view === "settings" ? "active" : ""}`}
+            onClick={() => setView("settings")}
+          >
+            <Settings size={17} /> Settings
+          </button>
+
           <div className="section-label recent-label">YOUR CONVERSATIONS</div>
           <div className="chat-history">
             {chatSessions.length === 0 && (
@@ -922,6 +1015,9 @@ export default function App() {
               <b>Workspace</b>
               <small title={session?.user?.email}>{session?.user?.email || "Signed in"}</small>
             </div>
+            <button className="icon-btn" title="Account settings" onClick={() => setView("settings")}>
+              <Settings size={16}/>
+            </button>
             <button className="icon-btn" title="Sign out" onClick={() => supabase.auth.signOut()}>
               <ArrowLeft size={16}/>
             </button>
@@ -963,13 +1059,17 @@ export default function App() {
                   ? "Semantic search"
                   : view === "documents"
                     ? "Documents"
-                    : title}
+                    : view === "settings"
+                      ? "Settings"
+                      : title}
               </b>
 
               <small>
                 {view === "search"
                   ? "Find meaning across your indexed PDFs"
-                  : "Ask questions about your knowledge"}
+                  : view === "settings"
+                    ? "Manage your profile and account"
+                    : "Ask questions about your knowledge"}
               </small>
             </div>
 
@@ -997,7 +1097,33 @@ export default function App() {
           </div>
         </header>
 
-        {view === "search" ? (
+        {view === "settings" ? (
+          <section className="documents-workspace">
+            <div className="workspace-heading">
+              <div>
+                <h1>Account settings</h1>
+                <p>Manage your IntelliDoc AI profile and account security.</p>
+              </div>
+            </div>
+            <div className="document-grid">
+              <article className="document-card" style={{ gridColumn: "1 / -1", alignItems: "flex-start", gap: 12 }}>
+                <User size={25} />
+                <b>Profile</b>
+                <small>Signed in as</small>
+                <p style={{ margin: 0, overflowWrap: "anywhere" }}>{session?.user?.email || "Signed in"}</p>
+                <small>User ID: {session?.user?.id || "Unavailable"}</small>
+              </article>
+              <article className="document-card" style={{ gridColumn: "1 / -1", alignItems: "flex-start", gap: 12, border: "1px solid #fecaca" }}>
+                <Trash2 size={25} color="#dc2626" />
+                <b>Delete account</b>
+                <small>Permanently delete your account, uploaded PDFs, indexed document content, and chat history. This action cannot be undone.</small>
+                <button onClick={deleteAccount} style={{ background: "#dc2626", color: "white", border: 0, borderRadius: 8, padding: "10px 16px", cursor: "pointer" }}>
+                  Permanently delete my account
+                </button>
+              </article>
+            </div>
+          </section>
+        ) : view === "search" ? (
 
           <section className="search-workspace">
 
