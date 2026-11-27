@@ -17,7 +17,7 @@ from typing import Any
 from aiohttp import request
 import pymupdf as fitz
 import numpy as np
-from sentence_transformers import SentenceTransformer
+from fastembed import TextEmbedding
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -38,7 +38,7 @@ load_dotenv(_BACKEND_DIR.parent / ".env", override=False)
 MAX_FILE_SIZE = 50 * 1024 * 1024
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 150
-MODEL_NAME = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+MODEL_NAME = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
 EMBEDDING_DIMENSION = 384
 TOP_K_DEFAULT = 5
 STORAGE_BUCKET = os.getenv("SUPABASE_STORAGE_BUCKET", "intellidoc-documents")
@@ -168,13 +168,9 @@ def require_user(
         ) from exc
 
     try:
-        # PostgREST's auth() method sets the Authorization bearer token for
-        # database requests made through this request-scoped client.
+    
         user_client.postgrest.auth(token)
 
-        # storage3 2.34.1 exposes SyncStorageClient; it does not expose
-        # storage.auth(token) on the Supabase Client. Construct Storage with
-        # the public API key and this user's JWT explicitly.
         storage_client = SyncStorageClient(
             f"{url.rstrip('/')}/storage/v1",
             {
@@ -221,19 +217,37 @@ def get_model():
     if model is None:
         with model_lock:
             if model is None:
-                model = SentenceTransformer(MODEL_NAME, device=os.getenv("EMBEDDING_DEVICE", "cpu"))
+                model = TextEmbedding(MODEL_NAME, device=os.getenv("EMBEDDING_DEVICE", "cpu"))
     return model
 
 
 def encode_texts(texts: list[str]) -> list[list[float]]:
     if not texts:
         return []
-    vectors = get_model().encode(
-        texts, convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False
-    )
+
+    # Generate embeddings using FastEmbed
+    vectors = list(get_model().embed(texts))
+
     vectors = np.asarray(vectors, dtype="float32")
-    if vectors.ndim != 2 or vectors.shape[1] != EMBEDDING_DIMENSION:
-        raise RuntimeError(f"Expected 384-dimensional embeddings; received {vectors.shape}.")
+
+    if vectors.ndim != 2:
+        raise RuntimeError(
+            f"Invalid embedding shape: {vectors.shape}"
+        )
+
+    if vectors.shape[1] != EMBEDDING_DIMENSION:
+        raise RuntimeError(
+            f"Expected {EMBEDDING_DIMENSION}-dimensional "
+            f"embeddings; received {vectors.shape}"
+        )
+
+    # Normalize embeddings for cosine similarity
+    norms = np.linalg.norm(
+        vectors, axis=1, keepdims=True
+    )
+
+    vectors = vectors / np.maximum(norms, 1e-12)
+
     return vectors.tolist()
 
 

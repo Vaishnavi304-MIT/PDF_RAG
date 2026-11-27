@@ -43,3 +43,4 @@ backend/.cache/
 *.index
 
 node_modules
+.env.local

@@ -9,3 +9,5 @@ uploads/
 *.db
 *.sqlite
 *.index
+.env
+.env.*

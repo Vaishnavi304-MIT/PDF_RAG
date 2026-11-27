@@ -1,5 +1,5 @@
 
-FROM node:20-alpine AS build
+FROM node:22-alpine AS builder
 
 WORKDIR /app
 
@@ -8,19 +8,22 @@ RUN npm ci
 
 COPY . .
 
-ARG VITE_API_BASE_URL
-ARG VITE_SUPABASE_URL
-ARG VITE_SUPABASE_ANON_KEY
+# Verify the environment file is available inside Docker
+RUN test -f .env.local || (echo "ERROR: .env.local is missing inside Docker" && exit 1)
 
-ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
-ENV VITE_SUPABASE_URL=$VITE_SUPABASE_URL
-ENV VITE_SUPABASE_ANON_KEY=$VITE_SUPABASE_ANON_KEY
+# Verify required variable names exist
+RUN grep -q '^VITE_SUPABASE_URL=' .env|| (echo "ERROR: VITE_SUPABASE_URL missing" && exit 1)
 
+RUN grep -q '^VITE_SUPABASE_ANON_KEY=' .env || (echo "ERROR: VITE_SUPABASE_ANON_KEY missing" && exit 1)
+
+# Build React application
 RUN npm run build
 
 FROM nginx:1.27-alpine
 
+COPY --from=builder /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
-COPY --from=build /app/dist /usr/share/nginx/html
 
 EXPOSE 80
+
+CMD ["nginx", "-g", "daemon off;"]

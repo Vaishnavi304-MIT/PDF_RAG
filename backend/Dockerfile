@@ -14,18 +14,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Install CPU-only PyTorch only if required by your application.
-# Keep this step for now until requirements and imports are checked.
-RUN python -m pip install --upgrade pip && \
-    pip install --no-cache-dir torch \
-    --index-url https://download.pytorch.org/whl/cpu
+RUN python -m pip install --upgrade pip
 
+# Copy root requirements file
 COPY requirements.txt ./requirements.txt
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app/ ./app/
-COPY migrate_sqlite_to_supabase.py ./
+
+# Copy backend application
+COPY backend/app/ ./app/
+COPY backend/migrate_sqlite_to_supabase.py ./
 
 EXPOSE 8000
 
