@@ -9,4 +9,8 @@ numpy
 groq
 supabase
 ddgs
+<<<<<<< HEAD:requirements.txt
 
+=======
+gradio
+>>>>>>> 0c6bccbf5a41fce87239a4d3f1102e425e0ef3e5:backend/requirements.txt
