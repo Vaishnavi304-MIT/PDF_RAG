@@ -45,3 +45,6 @@ backend/.cache/
 node_modules
 .env
 config.jsonc
+
+.branches
+.temp
