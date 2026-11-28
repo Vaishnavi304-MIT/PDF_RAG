@@ -6,7 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HF_HOME=/tmp/huggingface \
     PORT=8000
 
-WORKDIR /app
+WORKDIR /backend
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
