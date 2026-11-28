@@ -20,7 +20,7 @@ COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # backend/app/ and backend/migrate_sqlite_to_supabase.py are relative to repo root
-COPY backend/app/ ./app/
+COPY backend/ .
 
 
 EXPOSE 8000
